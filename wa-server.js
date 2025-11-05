@@ -25,10 +25,10 @@ try {
 } catch { /* opcional */ }
 
 /* =========================
-   Config
+   Config (Render-ready)
    ========================= */
-const PORT = process.env.SERVER_PORT || 4000;
-const HOST = process.env.SERVER_HOST || "0.0.0.0";
+const PORT = Number(process.env.PORT || 4000); // Render inyecta PORT
+const HOST = "0.0.0.0";
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim();
 const SUPABASE_SERVICE_ROLE = (process.env.SUPABASE_SERVICE_ROLE || "").trim();
@@ -93,7 +93,7 @@ async function assertSupabaseConfig() {
     console.error("❌ La SERVICE_ROLE corresponde a otro proyecto.", { claimRef, urlRef });
     process.exit(1);
   } else if (claimRole && String(claimRole).toLowerCase() !== "service_role") {
-    console.warn("⚠️ El claim 'role' no es 'service_role' (puede no venir en algunas claves). role=", claimRole);
+    console.warn("⚠️ claim 'role' distinto de 'service_role' (puede no venir). role=", claimRole);
   }
 
   // Prueba real de conexión
@@ -175,7 +175,7 @@ async function sendMetaCapiEvent({
   }
 }
 
-await assertSupabaseConfig();
+// (⚠️ IMPORTANTE) — Eliminado el `await assertSupabaseConfig();` duplicado aquí.
 
 const lines = new Map(); // line_id -> { client, status, lastQrDataUrl, phone, project_id }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -378,6 +378,7 @@ function guessBank(text = "") {
   }
   return null;
 }
+
 /// === OCR extra: fallback agresivo por grilla (Mercado Pago) — v3 con triple-cero por tile ===
 async function tryExtractAmountFromImage({ base64, mimetype }) {
   if (!sharp) return null;
@@ -869,71 +870,70 @@ async function attachClient(line_id, client) {
       if (agErr) console.error("[agenda] upsert error:", agErr);
 
       // 3.1) LEAD ÚNICO (una vez por proyecto+teléfono)
-try {
-  const { data: leadExists, error: leadSelErr } = await supabase
-    .from("analytics_leads")
-    .select("id")
-    .eq("project_id", project_id)
-    .eq("contact", contact)
-    .maybeSingle();
+      try {
+        const { data: leadExists, error: leadSelErr } = await supabase
+          .from("analytics_leads")
+          .select("id")
+          .eq("project_id", project_id)
+          .eq("contact", contact)
+          .maybeSingle();
 
-  if (!leadExists) {
-    const { error: leadInsErr } = await supabase
-      .from("analytics_leads")
-      .insert({
-        project_id,
-        contact,
-        wa_phone,
-        source_slug: slug || null,
-        source_page_id: page_id || null,
-        created_at: new Date().toISOString(),
-      });
-    if (leadInsErr) console.error("[analytics_leads] insert error:", leadInsErr);
-  }
-} catch (e) {
-  console.warn("[analytics_leads] upsert-once error:", e?.message || e);
-}
+        if (!leadExists) {
+          const { error: leadInsErr } = await supabase
+            .from("analytics_leads")
+            .insert({
+              project_id,
+              contact,
+              wa_phone,
+              source_slug: slug || null,
+              source_page_id: page_id || null,
+              created_at: new Date().toISOString(),
+            });
+          if (leadInsErr) console.error("[analytics_leads] insert error:", leadInsErr);
+        }
+      } catch (e) {
+        console.warn("[analytics_leads] upsert-once error:", e?.message || e);
+      }
 
-     // === LEAD ÚNICO por número: “Hola mi codigo de descuento es…” ===
-try {
-  const text = (textForTag || "").toLowerCase();
+      // === LEAD ÚNICO por número: “Hola mi codigo de descuento es…” ===
+      try {
+        const text = (textForTag || "").toLowerCase();
 
-  // Detecta variantes con/ sin acentos, con “:” o “-”, con texto extra
-  const leadRe = /^\s*hola\s+mi\s+c[oó]digo\s+de\s+descuento\s+es\s*[:\-]?\s*\S+/i;
+        // Detecta variantes con/ sin acentos, con “:” o “-”, con texto extra
+        const leadRe = /^\s*hola\s+mi\s+c[oó]digo\s+de\s+descuento\s+es\s*[:\-]?\s*\S+/i;
 
-  if (leadRe.test(text)) {
-    await supabase
-      .from("analytics_leads")
-      .upsert(
-        {
-          project_id,
-          page_id,
-          slug,
-          contact,
-          first_message: textForTag.slice(0, 1000), // guardamos el primero
-          created_at: new Date().toISOString(),
-        },
-        { onConflict: "project_id,contact", ignoreDuplicates: false }
-      );
-  }
-} catch (e) {
-  console.warn("[leads] upsert error:", e?.message || e);
-}
+        if (leadRe.test(text)) {
+          await supabase
+            .from("analytics_leads")
+            .upsert(
+              {
+                project_id,
+                page_id,
+                slug,
+                contact,
+                first_message: textForTag.slice(0, 1000),
+                created_at: new Date().toISOString(),
+              },
+              { onConflict: "project_id,contact", ignoreDuplicates: false }
+            );
+        }
+      } catch (e) {
+        console.warn("[leads] upsert error:", e?.message || e);
+      }
 
-/* 🔵 Meta CAPI: LEAD (cuando llega un mensaje que califica y hay page_id)
-   Requiere que ya exista la helper sendMetaCapiEvent() definida más arriba. */
-try {
-  if (page_id) {
-    await sendMetaCapiEvent({
-      page_id,
-      event_name: "Lead",
-      external_id: contact,      // teléfono del lead (el hash lo hace el endpoint)
-      action_source: "chat"
-    });
-  }
-} catch (e) {
-  console.warn("[meta-capi] Lead send error:", e?.message || e);
-}
+      // 🔵 Meta CAPI: LEAD
+      try {
+        if (page_id) {
+          await sendMetaCapiEvent({
+            page_id,
+            event_name: "Lead",
+            external_id: contact,
+            action_source: "chat",
+          });
+        }
+      } catch (e) {
+        console.warn("[meta-capi] Lead send error:", e?.message || e);
+      }
 
       // 4) ¿es comprobante?
       const looksLikeMedia = msg.hasMedia === true || msg.type === "image" || msg.type === "document";
@@ -961,60 +961,52 @@ try {
             const IS_MP = /mercado\s*pago/i.test(combined);
 
             // 1) patrón fuerte de miles -> usar el mayor (con filtros anti-CVU/CBU/CUIT)
-if (!Number.isFinite(amount) || amount < 1000) {
-  const NB = "\u00A0", NN = "\u202F";
-  const RE_GROUPED =
-    new RegExp(String.raw`\$?\s*([1-9]\d{0,2}(?:[.\s${NB}${NN}]\d{3})+)(?:[.,]\d{1,2})?\b`, "g");
+            if (!Number.isFinite(amount) || amount < 1000) {
+              const NB = "\u00A0", NN = "\u202F";
+              const RE_GROUPED =
+                new RegExp(String.raw`\$?\s*([1-9]\d{0,2}(?:[.\s${NB}${NN}]\d{3})+)(?:[.,]\d{1,2})?\b`, "g");
 
-  // mismas heurísticas que findBestAmount
-  const BAD_CTX =
-    /(cuit|cuil|cvu|cbu|coelsa|operaci[oó]n|transacci[oó]n|identificaci[oó]n|c[oó]digo|n[uú]mero|referencia)/i;
-  const KEY_NEAR =
-    /(comprobante|transferencia|motivo|mercado\s*pago|pagaste|de\b|para\b|monto|importe|total)/i;
+              // mismas heurísticas que findBestAmount
+              const BAD_CTX =
+                /(cuit|cuil|cvu|cbu|coelsa|operaci[oó]n|transacci[oó]n|identificaci[oó]n|c[oó]digo|n[uú]mero|referencia)/i;
+              const KEY_NEAR =
+                /(comprobante|transferencia|motivo|mercado\s*pago|pagaste|de\b|para\b|monto|importe|total)/i;
 
-  const linesForSafety = (combined || "")
-    .replace(/\r/g, "")
-    .split(/\n+/)
-    .map(s => s.trim())
-    .filter(Boolean);
+              const linesForSafety = (combined || "")
+                .replace(/\r/g, "")
+                .split(/\n+/)
+                .map(s => s.trim())
+                .filter(Boolean);
 
-  let maxBig = null;
+              let maxBig = null;
 
-  for (const ln of linesForSafety) {
-    // descartar líneas sospechosas (CVU/CBU/CUIT/IDs)
-    if (BAD_CTX.test(ln)) continue;
+              for (const ln of linesForSafety) {
+                if (BAD_CTX.test(ln)) continue;
+                const hasCurrency = /\$/.test(ln);
+                const nearMoney   = KEY_NEAR.test(ln);
+                if (!hasCurrency && !nearMoney) continue;
 
-    const hasCurrency = /\$/.test(ln);
-    const nearMoney   = KEY_NEAR.test(ln);
+                let m;
+                while ((m = RE_GROUPED.exec(ln)) !== null) {
+                  const raw = m[1];
+                  const digits = raw.replace(/[^\d]/g, "");
+                  const len = digits.length;
+                  if (len >= 15 || len === 22) continue; // evita CVU/CBU/IDs
 
-    // exigimos $ o keyword cercana en la MISMA línea
-    if (!hasCurrency && !nearMoney) continue;
+                  const v = toNumberARS(raw);
+                  if (!Number.isFinite(v)) continue;
+                  if (v >= 1000 && v <= 10_000_000) {
+                    maxBig = maxBig ? Math.max(maxBig, v) : v;
+                  }
+                }
+              }
 
-    let m;
-    while ((m = RE_GROUPED.exec(ln)) !== null) {
-      const raw = m[1];
-
-      // descartar por longitud de dígitos (evita CVU/CBU/IDs)
-      const digits = raw.replace(/[^\d]/g, "");
-      const len = digits.length;
-      if (len >= 15 || len === 22) continue; // 15+ dígitos (o 22 exactos) => no es monto
-
-      const v = toNumberARS(raw);
-      if (!Number.isFinite(v)) continue;
-
-      // rango razonable
-      if (v >= 1000 && v <= 10_000_000) {
-        maxBig = maxBig ? Math.max(maxBig, v) : v;
-      }
-    }
-  }
-
-  if (Number.isFinite(maxBig)) {
-    amount = maxBig;
-    score = Math.max(score, 10);
-    console.log(`[${line_id}] 🔧 Safety monto (mayor formateado con filtros) → $${amount}`);
-  }
-}
+              if (Number.isFinite(maxBig)) {
+                amount = maxBig;
+                score = Math.max(score, 10);
+                console.log(`[${line_id}] 🔧 Safety monto → $${amount}`);
+              }
+            }
 
             // 2) pista ".000"/variantes -> escalar
             {
@@ -1022,7 +1014,7 @@ if (!Number.isFinite(amount) || amount < 1000) {
               if (Number.isFinite(amount) && amount < 1000 && RE_TRIPLE_ZERO_HINT.test(combined)) {
                 amount = amount * 1000;
                 score = Math.max(score, 10);
-                console.log(`[${line_id}] 🔧 Ajuste miles por pista ".000" en texto → $${amount}`);
+                console.log(`[${line_id}] 🔧 Ajuste miles → $${amount}`);
               }
             }
 
@@ -1032,10 +1024,10 @@ if (!Number.isFinite(amount) || amount < 1000) {
               amount = amount * 1000;
               score = Math.max(score, 10);
               provider = provider || "Mercado Pago";
-              console.log(`[${line_id}] ⚙️ Regla MP x1000 aplicada → $${amount}`);
+              console.log(`[${line_id}] ⚙️ Regla MP x1000 → $${amount}`);
             }
 
-            // 4) Fallback visual (detección por grilla) sólo para MP
+            // 4) Fallback visual sólo para MP
             if ((!Number.isFinite(amount) || amount <= 0) &&
                 IS_MP &&
                 /^image\/(jpeg|png|webp)$/i.test(mimetype)) {
@@ -1050,12 +1042,12 @@ if (!Number.isFinite(amount) || amount < 1000) {
               }
             }
 
-            // 5) volver a aplicar MP x1000 si el fallback quedó < 1000
+            // 5) post-fallback MP x1000
             if (MP_FORCE_X1000 && IS_MP && Number.isFinite(amount) && amount > 0 && amount < 1000) {
               amount = amount * 1000;
               score = Math.max(score, 12);
               provider = provider || "Mercado Pago";
-              console.log(`[${line_id}] ⚙️ Regla MP x1000 (post-fallback) → $${amount}`);
+              console.log(`[${line_id}] ⚙️ MP x1000 (post) → $${amount}`);
             }
 
             if (score >= 4 && amount && amount > 0) {
@@ -1082,22 +1074,22 @@ if (!Number.isFinite(amount) || amount < 1000) {
                 .eq("contact", contact);
 
               console.log(`[${line_id}] ✅ Comprobante procesado (score:${score}, $${amount})`);
-             
-    // 🔵 Meta CAPI: Purchase
-  try {
-    if (page_id && Number.isFinite(amount) && amount > 0) {
-      await sendMetaCapiEvent({
-        page_id,
-        event_name: "Purchase",
-        external_id: contact, // teléfono del cliente
-        value: amount,
-        currency: "ARS",
-        action_source: "chat",
-      });
-    }
-  } catch (e) {
-    console.warn("[meta-capi] Purchase send error:", e?.message || e);
-  }
+
+              // 🔵 Meta CAPI: Purchase
+              try {
+                if (page_id && Number.isFinite(amount) && amount > 0) {
+                  await sendMetaCapiEvent({
+                    page_id,
+                    event_name: "Purchase",
+                    external_id: contact,
+                    value: amount,
+                    currency: "ARS",
+                    action_source: "chat",
+                  });
+                }
+              } catch (e) {
+                console.warn("[meta-capi] Purchase send error:", e?.message || e);
+              }
 
             } else {
               console.log(`[${line_id}] ❎ Ignorado (no parece comprobante) score:${score}, amount:${amount}`);
@@ -1169,11 +1161,40 @@ async function ensureClient(line_id) {
 }
 
 /* =========================
-   API HTTP
+   API HTTP (CORS + health)
    ========================= */
 const app = express();
-app.use(cors());
 app.use(express.json());
+
+// 🔐 CORS: permití tu front en Render + locales opcionales por env
+const allowedOrigins = new Set(
+  [
+    "https://flowtracking-clean.onrender.com",
+    process.env.FRONTEND_ORIGIN,
+    process.env.ALLOW_ORIGIN_1,
+    process.env.ALLOW_ORIGIN_2,
+    "http://localhost:3000",
+    "http://localhost:5173",
+  ].filter(Boolean)
+);
+
+const corsOptions = {
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);          // curl/postman
+    if (allowedOrigins.has(origin)) return cb(null, true);
+    return cb(new Error("CORS bloqueado: " + origin), false);
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-line-id", "x-api-key"],
+};
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+
+app.set("trust proxy", 1); // Render proxy
+
+// ✅ Healthcheck
+app.get("/health", (_req, res) => res.status(200).send("ok"));
 
 /** Página QR simple (dev) */
 app.get("/qr", async (req, res) => {
@@ -1230,6 +1251,7 @@ app.get("/lines/:lineId/events", async (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
 
   const st = await ensureClient(lineId);
@@ -1513,13 +1535,10 @@ function extractReceiptFields(text = "") {
 
   const firstNiceName = (blk) => {
     if (!blk) return null;
-    // "Nombre: X", "Titular: X", "Beneficiario: X"
     const tag = blk.match(/(?:nombre|titular|beneficiario)\s*[:\-]\s*([A-ZÁÉÍÓÚÑa-záéíóúñ .]+)/i);
     if (tag?.[1]) return tag[1].trim();
-    // "De: X", "Para: X", "A: X"
     const dePara = blk.match(/\b(?:de|para|a)\s*[:\-]\s*([A-ZÁÉÍÓÚÑa-záéíóúñ .]+)/i);
     if (dePara?.[1]) return dePara[1].trim();
-    // Primera línea con letras (sin muchos números)
     const first = blk
       .split(/\n+/)
       .map((l) => l.trim())
@@ -1534,13 +1553,10 @@ function extractReceiptFields(text = "") {
 
   const pickAccount = (blk) => {
     if (!blk) return null;
-    // CBU/CVU (22 dígitos)
     const cbu = firstMatch(RE_CBU, blk);
     if (cbu) return cbu;
-    // Alias (si aparece con alguna etiqueta)
     const alias = blk.match(/(?:alias|cvu|cbu)\s*[:\-]?\s*([a-z0-9._-]{6,})/i);
     if (alias?.[1]) return alias[1].trim();
-    // Último recurso: primer "alias" libre
     const loneAlias = blk.match(RE_ALIAS);
     if (loneAlias?.[0] && !/\d{10,}/.test(loneAlias[0])) return loneAlias[0];
     return null;
@@ -1578,7 +1594,6 @@ function extractReceiptFields(text = "") {
       /\b(archivo|adjunto|comprobante)\b/i
     );
 
-  // Completar desde bloques si existen
   if (originBlk) {
     out.origin.name = firstNiceName(originBlk);
     out.origin.cuit = pickCuit(originBlk);
@@ -1593,30 +1608,24 @@ function extractReceiptFields(text = "") {
   }
 
   // ====== Fallback global si faltan datos ======
-  // CUITs y cuentas en todo el texto (para repartir si no hubo bloques)
   const allCuist = [...norm.matchAll(RE_CUIT)].map((m) => m[0].replace(/-/g, ""));
   const allAccts = [...norm.matchAll(RE_CBU)].map((m) => m[0]);
   const allAlias = [...norm.matchAll(RE_ALIAS)].map((m) => m[0]).filter((a) => !/\d{10,}/.test(a));
 
-  // Banco general si falta (ej: Mercado Pago)
   const bankGlobal = guessBank(text);
 
-  // Heurística: si no tengo cuenta/cuit en origen/destino, asigno primero a origen y último a destino.
   if (!out.origin.cuit && allCuist.length) out.origin.cuit = allCuist[0];
   if (!out.destination.cuit && allCuist.length > 1) out.destination.cuit = allCuist[allCuist.length - 1];
 
   if (!out.origin.account && allAccts.length) out.origin.account = allAccts[0];
   if (!out.destination.account && allAccts.length > 1) out.destination.account = allAccts[allAccts.length - 1];
 
-  // Si no hubo CBU/CVU, intento alias
   if (!out.origin.account && allAlias.length) out.origin.account = allAlias[0];
   if (!out.destination.account && allAlias.length > 1) out.destination.account = allAlias[allAlias.length - 1];
 
-  // Banco por bloque o global
   if (!out.origin.bank) out.origin.bank = bankGlobal;
   if (!out.destination.bank) out.destination.bank = bankGlobal;
 
-  // Nombre: si vino por plantilla, úsalo
   if (!out.origin.name && tpl?.fields?.nameFrom) out.origin.name = tpl.fields.nameFrom;
   if (!out.destination.name && tpl?.fields?.nameTo) out.destination.name = tpl.fields.nameTo;
 
@@ -1627,7 +1636,6 @@ function scoreReceiptText(text = "") {
   const t = (text || "").replace(/\s+/g, " ").trim();
   let score = 0;
 
-  // pequeños boosts por frases fuertes
   if (/comprobante\s+de\s+transferencia/i.test(t)) score += 2;
   if (/enviaste/i.test(t)) score += 1;
 
