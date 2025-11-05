@@ -25,10 +25,14 @@ try {
 } catch { /* opcional */ }
 
 /* =========================
-   Config (Render-ready)
+   Config
    ========================= */
-const PORT = Number(process.env.PORT || 4000); // Render inyecta PORT
-const HOST = "0.0.0.0";
+const PORT  = Number(process.env.PORT || process.env.SERVER_PORT || 4000); // Render usa PORT
+const HOST  = process.env.SERVER_HOST || "0.0.0.0";
+
+// Dominio del frontend permitido por CORS
+const FRONT_ORIGIN =
+  process.env.ALLOWED_ORIGIN || "https://flowtracking-clean.onrender.com";
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim();
 const SUPABASE_SERVICE_ROLE = (process.env.SUPABASE_SERVICE_ROLE || "").trim();
@@ -1164,15 +1168,16 @@ async function ensureClient(line_id) {
    API HTTP (CORS + health)
    ========================= */
 const app = express();
-app.use(express.json());
 
-// 🔐 CORS: permití tu front en Render + locales opcionales por env
+// 🔐 ORIGEN permitido (Render + local)
+const FRONT_ORIGIN =
+  process.env.FRONTEND_ORIGIN ||
+  process.env.ALLOW_ORIGIN_1 ||
+  "https://flowtracking-clean.onrender.com";
+
 const allowedOrigins = new Set(
   [
-    "https://flowtracking-clean.onrender.com",
-    process.env.FRONTEND_ORIGIN,
-    process.env.ALLOW_ORIGIN_1,
-    process.env.ALLOW_ORIGIN_2,
+    FRONT_ORIGIN,
     "http://localhost:3000",
     "http://localhost:5173",
   ].filter(Boolean)
@@ -1180,7 +1185,7 @@ const allowedOrigins = new Set(
 
 const corsOptions = {
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true);          // curl/postman
+    if (!origin) return cb(null, true);                 // curl/Postman
     if (allowedOrigins.has(origin)) return cb(null, true);
     return cb(new Error("CORS bloqueado: " + origin), false);
   },
@@ -1188,10 +1193,17 @@ const corsOptions = {
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "x-line-id", "x-api-key"],
 };
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
 
-app.set("trust proxy", 1); // Render proxy
+app.set("trust proxy", 1);
+app.use(cors(corsOptions));          // ⬅️ CORS primero
+app.options("*", cors(corsOptions));
+app.use(express.json());
+
+// (Opcional) log rápido para ver el origin que llega
+app.use((req, _res, next) => {
+  console.log("[CORS]", req.method, req.path, "Origin:", req.headers.origin || "-");
+  next();
+});
 
 // ✅ Healthcheck
 app.get("/health", (_req, res) => res.status(200).send("ok"));
@@ -1248,38 +1260,65 @@ app.get("/qr", async (req, res) => {
 /** SSE estado/QR */
 app.get("/lines/:lineId/events", async (req, res) => {
   const { lineId } = req.params;
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
+
+  // 🔐 Reflejar CORS para EventSource
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Vary", "Origin"); // para proxies/CDN
+  }
+
+  // 🟢 Headers SSE (y evitar buffering/compression)
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
-  res.flushHeaders();
+  res.setHeader("X-Accel-Buffering", "no"); // evita buffer en proxies tipo Nginx
+  if (res.flushHeaders) res.flushHeaders();
 
-  const st = await ensureClient(lineId);
-  res.write(
-    `data: ${JSON.stringify({
-      status: st.status,
-      phone: st.phone || null,
-      qr: st.lastQrDataUrl || null,
-    })}\n\n`
-  );
+  // 🔄 Aseguramos el cliente y emitimos estado inicial
+  const st = await ensureClient(lineId).catch(() => null);
+  const nowState = st || { status: "initializing", phone: null, lastQrDataUrl: null };
 
-  let last = { s: st.status, q: st.lastQrDataUrl, p: st.phone };
+  const send = (payload) => {
+    try {
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    } catch {
+      // si falla el write, cerramos
+      try { res.end(); } catch {}
+    }
+  };
 
-  const timer = setInterval(() => {
+  send({
+    status: nowState.status,
+    phone: nowState.phone || null,
+    qr: nowState.lastQrDataUrl || null,
+  });
+
+  // 🫀 Heartbeat para mantener viva la conexión (cada 15s)
+  const heartbeat = setInterval(() => {
+    try { res.write(`:\n\n`); } catch {}
+  }, 15000);
+
+  // 🔔 Push de cambios cuando varía el estado/QR/teléfono
+  let last = { s: nowState.status, q: nowState.lastQrDataUrl, p: nowState.phone };
+  const poll = setInterval(() => {
     const cur = lines.get(lineId) || {};
     if (cur.status !== last.s || cur.lastQrDataUrl !== last.q || cur.phone !== last.p) {
       last = { s: cur.status, q: cur.lastQrDataUrl, p: cur.phone };
-      res.write(
-        `data: ${JSON.stringify({
-          status: cur.status,
-          phone: cur.phone || null,
-          qr: cur.lastQrDataUrl || null,
-        })}\n\n`
-      );
+      send({
+        status: cur.status,
+        phone: cur.phone || null,
+        qr: cur.lastQrDataUrl || null,
+      });
     }
   }, 700);
 
-  req.on("close", () => clearInterval(timer));
+  // 🧹 Limpieza al desconectar el cliente
+  req.on("close", () => {
+    clearInterval(poll);
+    clearInterval(heartbeat);
+  });
 });
 
 /** JSON con QR actual (si está listo) */
