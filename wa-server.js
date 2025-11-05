@@ -1169,15 +1169,10 @@ async function ensureClient(line_id) {
    ========================= */
 const app = express();
 
-// 🔐 ORIGEN permitido (Render + local)
-const FRONT_ORIGIN =
-  process.env.FRONTEND_ORIGIN ||
-  process.env.ALLOW_ORIGIN_1 ||
-  "https://flowtracking-clean.onrender.com";
-
+// CORS: permitir solo tu front (Render) y localhost
 const allowedOrigins = new Set(
   [
-    FRONT_ORIGIN,
+    FRONT_ORIGIN,            // viene definido arriba
     "http://localhost:3000",
     "http://localhost:5173",
   ].filter(Boolean)
@@ -1185,7 +1180,7 @@ const allowedOrigins = new Set(
 
 const corsOptions = {
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true);                 // curl/Postman
+    if (!origin) return cb(null, true);            // curl/postman
     if (allowedOrigins.has(origin)) return cb(null, true);
     return cb(new Error("CORS bloqueado: " + origin), false);
   },
@@ -1194,9 +1189,10 @@ const corsOptions = {
   allowedHeaders: ["Content-Type", "Authorization", "x-line-id", "x-api-key"],
 };
 
-app.set("trust proxy", 1);
-app.use(cors(corsOptions));          // ⬅️ CORS primero
+app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
+app.set("trust proxy", 1);
+
 app.use(express.json());
 
 // (Opcional) log rápido para ver el origin que llega
